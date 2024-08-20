@@ -486,6 +486,17 @@ class FBref():
         return matches_df
 
     # ==============================================================================================
+    def epl_team_stats(self):
+        url = "https://fbref.com/en/comps/9/Premier-League-Stats"
+        self._driver_init()
+        self.driver.get(url)
+        soup = BeautifulSoup(self.driver.page_source, 'html.parser') # get initial soup
+
+        squad_stats_tag = soup.find('table', {'id': re.compile('home_away')})
+        self._driver_close()
+        return pd.read_html(str(squad_stats_tag))[0] if squad_stats_tag is not None else None
+    # ==============================================================================================
+
     def scrape_stats(
             self, year: str, league: str, stat_category: str
     ) -> Sequence[Union[pd.DataFrame, None]]:
