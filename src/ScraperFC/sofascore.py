@@ -1,9 +1,9 @@
 import pandas as pd
 from .scraperfc_exceptions import InvalidLeagueException, InvalidYearException
-from botasaurus.request import request, Request
-from botasaurus_requests import response
+from .utils import botasaurus_get
 import numpy as np
 from typing import Union, Sequence
+import warnings
 
 """ These are the status codes for Sofascore events. Found in event['status'] key.
 {100: {'code': 100, 'description': 'Ended', 'type': 'finished'},
@@ -24,27 +24,19 @@ comps = {
     # European continental club comps
     'Champions League': 7, 'Europa League': 679, 'Europa Conference League': 17015,
     # European domestic leagues
-    'EPL': 17, 'La Liga': 8, 'Bundesliga': 35, 'Serie A': 23, 'Ligue 1': 34,
+    'EPL': 17, 'La Liga': 8, 'Bundesliga': 35, 'Serie A': 23, 'Ligue 1': 34, 'Turkish Super Lig': 52,
     # South America
     'Argentina Liga Profesional': 155, 'Argentina Copa de la Liga Profesional': 13475,
     'Liga 1 Peru': 406, "Copa Libertadores": 384,
     # USA
     'MLS': 242, 'USL Championship': 13363, 'USL1': 13362, 'USL2': 13546,
+    # Middle East
+    "Saudi Pro League": 955,
     # Men's international comps
     'World Cup': 16, 'Euros': 1, 'Gold Cup': 140,
     # Women's international comps
     "Women's World Cup": 290
 }
-
-
-@request(output=None, create_error_logs=False)
-def _botasaurus_get(request: Request, url: str) -> response.Response:
-    """ Sofascore introduced some anti-scraping measures. Using Botasaurus gets around them.
-    """
-    if not isinstance(url, str):
-        raise TypeError('`url` must be a string.')
-    response = request.get(url)
-    return response
 
 
 class Sofascore:
@@ -69,6 +61,24 @@ class Sofascore:
         self.concatenated_fields = '%2C'.join(self.league_stats_fields)
 
     # ==============================================================================================
+    def _check_and_convert_to_match_id(self, match: Union[str, int]) -> int:
+        """ Helper function that will take a Sofascore match URL or match ID and return a match ID
+
+        Parameters
+        ----------
+        match : str or int
+            Strings will be interprated as URLs and ints will be interpreted as match IDs.
+
+        Returns
+        -------
+        match_id : int
+        """
+        if not isinstance(match, int) and not isinstance(match, str):
+            raise TypeError('`match` must a string or int')
+        match_id = match if isinstance(match, int) else self.get_match_id_from_url(match)
+        return match_id
+
+    # ==============================================================================================
     def get_valid_seasons(self, league: str) -> dict:
         """ Returns the valid seasons and their IDs for the given league
 
@@ -87,7 +97,7 @@ class Sofascore:
         if league not in comps.keys():
             raise InvalidLeagueException(league, 'Sofascore', list(comps.keys()))
             
-        response = _botasaurus_get(f'{API_PREFIX}/unique-tournament/{comps[league]}/seasons/')
+        response = botasaurus_get(f'{API_PREFIX}/unique-tournament/{comps[league]}/seasons/')
         seasons = dict([(x['year'], x['id']) for x in response.json()['seasons']])
         return seasons
 
@@ -116,7 +126,7 @@ class Sofascore:
         matches = list()
         i = 0
         while 1:
-            response = _botasaurus_get(
+            response = botasaurus_get(
                 f'{API_PREFIX}/unique-tournament/{comps[league]}/season/{valid_seasons[year]}/' +
                 f'events/last/{i}'
             )
@@ -180,10 +190,8 @@ class Sofascore:
         : dict
             Generic data about a match
         """
-        if not isinstance(match, int) and not isinstance(match, str):
-            raise TypeError('`match` must a string or int')
-        match_id = match if isinstance(match, int) else self.get_match_id_from_url(match)
-        response = _botasaurus_get(f'{API_PREFIX}/event/{match_id}')
+        match_id = self._check_and_convert_to_match_id(match)
+        response = botasaurus_get(f'{API_PREFIX}/event/{match_id}')
         data = response.json()['event']
         return data
 
@@ -245,11 +253,9 @@ class Sofascore:
         : dict
             Name and ID of every player in the match, {name: id, ...}
         """
-        if not isinstance(match, int) and not isinstance(match, str):
-            raise TypeError('`match` must a string or int')
-
-        match_id = match if isinstance(match, int) else self.get_match_id_from_url(match)
-        response = _botasaurus_get(f'{API_PREFIX}/event/{match_id}/lineups')
+        match_id = self._check_and_convert_to_match_id(match)
+        url = f"{API_PREFIX}/event/{match_id}/lineups"
+        response = botasaurus_get(url)
         teams = ['home', 'away']
         if response.status_code == 200:
             player_ids = dict()
@@ -259,15 +265,18 @@ class Sofascore:
                     player_data = item['player']
                     player_ids[player_data['name']] = player_data['id']
         else:
+            warnings.warn(f"\nReturned {response.status_code} from {url}. Returning empty dict.")
             player_ids = dict()
 
         return player_ids
     
     # ==============================================================================================
     def scrape_player_league_stats(
-        self, year: str, league: str, accumulation: str='total',
-        selected_positions: Sequence[str]=['Goalkeepers', 'Defenders', 'Midfielders', 'Forwards']
-    ) -> pd.DataFrame:
+            self, year: str, league: str, accumulation: str='total',
+            selected_positions: Sequence[str]=[
+                'Goalkeepers', 'Defenders', 'Midfielders', 'Forwards'
+            ]
+        ) -> pd.DataFrame:
         """ Get every player statistic that can be asked in league pages on Sofascore.
 
         Parameters
@@ -312,7 +321,7 @@ class Sofascore:
                 f'&accumulation={accumulation}' +\
                 f'&fields={self.concatenated_fields}' +\
                 f'&filters=position.in.{positions}'
-            response = _botasaurus_get(request_url)
+            response = botasaurus_get(request_url)
             results += response.json()['results']
             if (response.json()['page'] == response.json()['pages']) or\
                     (response.json()['pages'] == 0):
@@ -347,13 +356,14 @@ class Sofascore:
             Dataframe of match momentum values. Will be empty if the match does not have
             match momentum data.
         """
-        if not isinstance(match, int) and not isinstance(match, str):
-            raise TypeError('`match` must a string or int')
-
-        match_id = match if isinstance(match, int) else self.get_match_id_from_url(match)
-        response = _botasaurus_get(f'{API_PREFIX}/event/{match_id}/graph')
-        match_momentum_df = pd.DataFrame(response.json()['graphPoints']) if \
-            response.status_code == 200 else pd.DataFrame()
+        match_id = self._check_and_convert_to_match_id(match)
+        url = f'{API_PREFIX}/event/{match_id}/graph'
+        response = botasaurus_get(url)
+        if response.status_code == 200:
+            match_momentum_df = pd.DataFrame(response.json()['graphPoints'])
+        else:
+            warnings.warn(f"\nReturned {response.status_code} from {url}. Returning empty dataframe.")
+            match_momentum_df = pd.DataFrame()
 
         return match_momentum_df
 
@@ -370,11 +380,9 @@ class Sofascore:
         -------
         : DataFrame
         """
-        if not isinstance(match, int) and not isinstance(match, str):
-            raise TypeError('`match` must a string or int')
-
-        match_id = match if isinstance(match, int) else self.get_match_id_from_url(match)
-        response = _botasaurus_get(f'{API_PREFIX}/event/{match_id}/statistics')
+        match_id = self._check_and_convert_to_match_id(match)
+        url = f'{API_PREFIX}/event/{match_id}/statistics'
+        response = botasaurus_get(url)
         if response.status_code == 200:
             df = pd.DataFrame()
             for period in response.json()['statistics']:
@@ -386,7 +394,9 @@ class Sofascore:
                     temp['group'] = [group_name,] * temp.shape[0]
                     df = pd.concat([df, temp], ignore_index=True)
         else:
+            warnings.warn(f"\nReturned {response.status_code} from {url}. Returning empty dataframe.")
             df = pd.DataFrame()
+        
         return df
 
     # ==============================================================================================
@@ -402,13 +412,22 @@ class Sofascore:
         -------
         : DataFrame
         """
-        if not isinstance(match, int) and not isinstance(match, str):
-            raise TypeError('`match` must a string or int')
-
-        match_id = match if isinstance(match, int) else self.get_match_id_from_url(match)
-        response = _botasaurus_get(f'{API_PREFIX}/event/{match_id}/lineups')
+        match_id = self._check_and_convert_to_match_id(match)
+        match_dict = self.get_match_dict(match_id)  # used to get home and away team names and IDs
+        url = f'{API_PREFIX}/event/{match_id}/lineups'
+        response = botasaurus_get(url)
+        
         if response.status_code == 200:
-            players = response.json()['home']['players'] + response.json()['away']['players']
+            home_players = response.json()['home']['players']
+            away_players = response.json()['away']['players']
+            for p in home_players:
+                p["teamId"] = match_dict["homeTeam"]["id"]
+                p["teamName"] = match_dict["homeTeam"]["name"]
+            for p in away_players:
+                p["teamId"] = match_dict["awayTeam"]["id"]
+                p["teamName"] = match_dict["awayTeam"]["name"]
+                players = home_players + away_players
+                
             temp = pd.DataFrame(players)
             columns = list()
             for c in temp.columns:
@@ -420,7 +439,9 @@ class Sofascore:
                     columns.append(temp[c])  # type: ignore
             df = pd.concat(columns, axis=1)
         else:
+            warnings.warn(f"\nReturned {response.status_code} from {url}. Returning empty dataframe.")
             df = pd.DataFrame()
+        
         return df
 
     # ==============================================================================================
@@ -438,12 +459,10 @@ class Sofascore:
             Each row is a player and columns averageX and averageY denote their average position on
             the match.
         """
-        if not isinstance(match, int) and not isinstance(match, str):
-            raise TypeError('`match` must a string or int')
-
+        match_id = self._check_and_convert_to_match_id(match)
         home_name, away_name = self.get_team_names(match)
-        match_id = match if isinstance(match, int) else self.get_match_id_from_url(match)
-        response = _botasaurus_get(f'{API_PREFIX}/event/{match_id}/average-positions')
+        url = f'{API_PREFIX}/event/{match_id}/average-positions'
+        response = botasaurus_get(url)
         if response.status_code == 200:
             df = pd.DataFrame()
             for key, name in [('home', home_name), ('away', away_name)]:
@@ -455,6 +474,7 @@ class Sofascore:
                 )
                 df = pd.concat([df, temp], axis=0, ignore_index=True)
         else:
+            warnings.warn(f"\nReturned {response.status_code} from {url}. Returning empty dataframe.")
             df = pd.DataFrame()
         return df
     
@@ -475,15 +495,42 @@ class Sofascore:
             Dict of players, their IDs and their heatmap coordinates, {player name: {'id':
             player_id, 'heatmap': heatmap}, ...}
         """
-        if not isinstance(match, int) and not isinstance(match, str):
-            raise TypeError('`match` must a string or int')
-
-        match_id = match if isinstance(match, int) else self.get_match_id_from_url(match)
+        match_id = self._check_and_convert_to_match_id(match)
         players = self.get_player_ids(match)
         for player in players:
             player_id = players[player]
-            response = _botasaurus_get(f'{API_PREFIX}/event/{match_id}/player/{player_id}/heatmap')
-            heatmap = [(z['x'], z['y']) for z in response.json()['heatmap']]\
-                if response.status_code == 200 else []
+            url = f'{API_PREFIX}/event/{match_id}/player/{player_id}/heatmap'
+            response = botasaurus_get(url)
+            if response.status_code == 200:
+                heatmap = [(z['x'], z['y']) for z in response.json()['heatmap']]
+            else:
+                # Players that didn't play have empty heatmaps. Don't print warning because there
+                # would be a lot of them.
+                heatmap = list()
             players[player] = {'id': player_id, 'heatmap': heatmap}
         return players
+    
+    # ==============================================================================================
+    def scrape_match_shots(self, match: Union[str, int]) -> pd.DataFrame:
+        """ Scrape shots for a match
+
+        Parameters
+        ----------
+        match : str or int
+            Sofascore match URL or match ID
+        
+        Returns
+        -------
+        : DataFrame
+        """
+        match_id = self._check_and_convert_to_match_id(match)
+        url = f"{API_PREFIX}/event/{match_id}/shotmap"
+        response = botasaurus_get(url)
+        if response.status_code == 200:
+            df = pd.DataFrame.from_dict(response.json()["shotmap"])
+        else:
+            warnings.warn(
+                f"Returned {response.status_code} from {url}. Returning empty dataframe."
+            )
+            df = pd.DataFrame()
+        return df

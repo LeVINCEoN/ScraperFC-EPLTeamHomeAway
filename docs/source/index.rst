@@ -13,10 +13,11 @@ Welcome to ScraperFC's documentation!
    :maxdepth: 1
    :caption: Contents:
 
-   getting_started
-   apidocumentation
-   contributing
-   year_parameter
+   getting_started.rst
+   code_examples.rst
+   apidocumentation.rst
+   contributing.rst
+   year_parameter.rst
 
 ==================
 Indices and tables
